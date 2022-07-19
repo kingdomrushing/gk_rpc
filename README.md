@@ -1,27 +1,123 @@
 # 基于Jetty的RPC框架实现
 
 ## 项目模块
-* 1 client 客户端
-* 2 server 服务
-* 3 proto 协议
-* 4 codec 编解码
-* 5 transport 数据传输
-* 6 utils 工具
-* 7 fulltest 测试样例
+* gkrpc-common     公共方法定义
+* gkrpc-proto      协议模块
+* gkrpc-codec      序列化模块
+* gkrpc-transport  网络通信模块
+* gkrpc-server     服务端模块
+* gkrpc-client     客户端模块
+* gkrpc-example    测试模块
 
+## 1. gkrpc-common 公共方法定义模块
+> 该模块目前主要为一些反射工具，其具体实现如下:
+```
+public class ReflectionUtils {
 
-## 1.Proto 模块
-> Proto模块用于规定数据传输协议和规约，其主要类有3个：
->> 1.1 Request类用于储存某一需要执行方法的method描述（即serviceDescriptor）与实参。
+    /**
+     * 根据class创建对象
+     * @param clazz 待创建对象的类
+     * @param <T> 对象类型
+     * @return 创建好的对象
+     */
+    public static <T> T newInstance(Class<T> clazz) {
+        try {
+            return clazz.newInstance();
+        } catch (Exception e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    /**
+     * 获取某个class的公有方法
+     * @param clazz
+     * @param <T>
+     * @return
+     */
+    public static <T> Method[] getPublicMethods(Class<T> clazz) {
+        // 类自身所有的方法，包括私有，公共等，不包含父类的
+        Method[] declaredMethods = clazz.getDeclaredMethods();
+        List<Method> pMethods = new ArrayList<>();
+        for (Method declaredMethod : declaredMethods) {
+            if (Modifier.isPublic(declaredMethod.getModifiers())) {
+                pMethods.add(declaredMethod);
+            }
+        }
+        return pMethods.toArray(new Method[0]);
+    }
+
+    /**
+     * 调用指定对象的指定方法，若是静态方法，则obj为NULL
+     * @param obj 指定对象
+     * @param method 指定方法
+     * @param args 参数
+     * @return 方法结果
+     */
+    public static Object invoke(Object obj,
+                                Method method,
+                                Object... args) {
+        try {
+            return method.invoke(obj, args);
+        } catch (Exception e) {
+            throw new IllegalStateException(e);
+        }
+    }
+}
+```
+>> 上述getPublicMethods()方法一个用途是获取Server的所有公共方法并注册这些服务。 invoke()方法用于执行指定实例对象的method。
+## 2. gkrpc-proto 协议模块
+> 该模块用于规定数据传输协议和规约，其主要类有4个：
+>> 2.1 Peer类表示网络传输的一个端点
+```
+@Data
+@AllArgsConstructor
+public class Peer {
+
+    private String host;
+
+    private Integer port;
+}
+```
+>> 2.2 ServiceDescriptor类用来描述某项服务，即某个类的具体方法。
+```
+public class ServiceDescriptor {
+
+    /**
+     * 类名
+     */
+    private String className;
+
+    /**
+     * 方法名
+     */
+    private String methodName;
+
+    /**
+     * 返回类型
+     */
+    private String returnType;
+
+    /**
+     * 参数类型
+     */
+    private String[] parameterTypes;
+    
+    // ...
+}
+```
+
+>> 2.3 Request类用于储存某一需要执行方法的method描述（即serviceDescriptor）与实参。
 ```
 @Data
 public class Request {
     private ServiceDescriptor serviceDescriptor;
     private Object [] parameters;
 }
+
+// 这里的实参将会在client调用方法时通过动态代理获取，并且通过http协议传递到Server进行处理。
+// 而在Server中会根据传递的class与实例通过反射进行实际方法的执行，最后将执行结果通过Response类进行返回。  
 ```
->>这里的实参将会在client调用方法时通过动态代理获取，并且通过http协议传递到Server进行处理。而在Server中会根据传递的class与实例通过反射进行实际方法的执行，最后将执行结果通过Response类进行返回。  
->> 1.2 Reponse类描述如下：
+>> 2.4 Reponse类描述如下：
 ```
 @Data
 public class Response {
@@ -40,97 +136,78 @@ public class Response {
 }
 
 ```
->> 1.3 ServiceDescriptor类描述如下：
-```
-@Data
-@AllArgsConstructor
-@NoArgsConstructor
-public class ServiceDescriptor {
-    private String clazz;//类名
-    private String method;//方法名
-    private String returnType;//返回类型
-    private String[] parameterTypes;//参数类型
-
-    public static ServiceDescriptor from(Class clazz, Method method){
-        ServiceDescriptor sdp = new ServiceDescriptor();
-        sdp.setClazz(clazz.getName());
-        sdp.setMethod(method.getName());
-        sdp.setReturnType(method.getReturnType().getName());
-
-        Class[] parameterClasses =  method.getParameterTypes();
-        String[] parameterTypes = new String[parameterClasses.length];
-        for(int i =0;i<parameterClasses.length;i++){
-            parameterTypes[i] = parameterClasses[i].getName();
-        }
-        sdp.setParameterTypes(parameterTypes);
-
-        return sdp;
-    }
-    // ...省略hashcode equals toString
-}
-```
->> 该类主要用于存储方法信息，而在Server中会将类映射到对应于该类的具体实例，以便反射执行具体方法。
-
-## 2 Transport 模块
+## 3. gkrpc-codec 序列化与反序列化模块
+> 数据在网络中传输是以流的形式，Request请求需要先序列化成数据流，然后在网络中传输，服务端接收到请求后，需要先将数据流反序列化成Request对象
+>> 这里已实现了JSON序列化与反序列化方法
+## 4 gkrpc-transport 网络通信模块
 > 该模块主要用于client与server的http通信处理问题，其client请求内容以Request类形式封装传输，server响应内容以Reponse类封装返回。
->> 2.1 HTTPTransportClient类实现如下：
+>> 4.1 HTTPTransportClient类实现如下：
 ```
-public class HTTPTransportClient implements  TransportClient{
+public class HttpTransportClient implements TransportClient{
     private String url;
+
     @Override
     public void connect(Peer peer) {
-        this.url="http://"+peer.getHost()+":"+peer.getPort();
+        this.url = "http://" + peer.getHost() + ":" + peer.getPort();
     }
 
+    // 向server传递数据并且获取响应数据。其最终调用将在RPCClient类中调用
     @Override
     public InputStream write(InputStream data) {
-
         try {
-            HttpURLConnection httpConn = (HttpURLConnection) new URL(url).openConnection();
-            httpConn.setDoInput(true);
-            httpConn.setDoOutput(true);
-            httpConn.setUseCaches(false);
-            httpConn.setRequestMethod("POST");
+            // 建立http连接
+            HttpURLConnection urlConnection = (HttpURLConnection) new URL(url).openConnection();
+            urlConnection.setDoInput(true);
+            urlConnection.setDoOutput(true);
+            urlConnection.setUseCaches(false);
+            urlConnection.setRequestMethod("POST");
+            urlConnection.connect();
 
-            httpConn.connect();
-            IOUtils.copy(data,httpConn.getOutputStream());
+            // 将data请求数据发送给该地址的服务
+            // outputStream: Returns an output stream that writes to this connection.
+            IOUtils.copy(data, urlConnection.getOutputStream());
 
-            int resultCode = httpConn.getResponseCode();
-            if(resultCode==HttpURLConnection.HTTP_OK){
-                return httpConn.getInputStream();
-            }else{
-                return httpConn.getErrorStream();
+            int result = urlConnection.getResponseCode();
+            if (result == HttpURLConnection.HTTP_OK) {
+                // 成功发送请求，则从输入流中获取数据
+                return urlConnection.getInputStream();
+            } else {
+                return urlConnection.getErrorStream();
             }
         } catch (IOException e) {
-            throw  new IllegalStateException(e);
+            throw new IllegalStateException(e);
         }
+    }
+
+    @Override
+    public void close() {
 
     }
-    @Override
-    public void close() {}
 }
-
 ```
->> Peer类为定义在Proto模块中的Server通信地址与端口不做特殊介绍。该类主要方法为write(),主要是用于向server传递数据并且获取响应数据。其最终调用将在RpcClient类中调用。  
-> 2.2 HTTPTransportServer 类主要实现如下：
+> 4.2 HTTPTransportServer 类主要实现如下：
 ```
 @Slf4j
-public class HttpTransportServer implements TransportServer {
+public class HttpTransportServer implements TransportServer{
 
-    private RequestHandler handler;
+    private RequestHandler requestHandler;
+
     private Server server;
 
     @Override
     public void init(int port, RequestHandler handler) {
-        this.handler = handler;
+        this.requestHandler = handler;
+        // 创建Jetty的服务
         this.server = new Server(port);
 
-        //servlet 接收请求
-        ServletContextHandler ctx = new ServletContextHandler();
-        server.setHandler(ctx);
+        // servlet 接收请求，针对每个请求，Jetty会从线程池中拿出一个线程去处理请求
+        ServletContextHandler servletContextHandler = new ServletContextHandler();
+        // 注册到server中
+        server.setHandler(servletContextHandler);
 
-        ServletHolder holder = new ServletHolder(new RequestServlet());
-        ctx.addServlet(holder,"/*");
+        // 创建ServletHolder托管RequestServlet
+        ServletHolder servletHolder = new ServletHolder(new RequestServlet());
+        servletContextHandler.addServlet(servletHolder, "/*");
     }
 
     @Override
@@ -139,8 +216,9 @@ public class HttpTransportServer implements TransportServer {
             server.start();
             server.join();
         } catch (Exception e) {
-            log.error(e.getMessage(),e);
+            log.error(e.getMessage(), e);
         }
+
     }
 
     @Override
@@ -148,192 +226,149 @@ public class HttpTransportServer implements TransportServer {
         try {
             server.stop();
         } catch (Exception e) {
-            log.error(e.getMessage(),e);
+            log.info(e.getMessage(), e);
         }
     }
 
-    class RequestServlet extends HttpServlet{
+    class RequestServlet extends HttpServlet {
         @Override
         protected void doPost(HttpServletRequest req, HttpServletResponse resp) throws ServletException, IOException {
-            log.info("client connect");
-
-            InputStream in =req.getInputStream();
-            OutputStream out = resp.getOutputStream();
-
-            if(handler !=null){
-                handler.onRequest(in,out);
+            log.info("client post data !!!");
+            ServletInputStream inputStream = req.getInputStream();
+            ServletOutputStream outputStream = resp.getOutputStream();
+            if (requestHandler != null) {
+                requestHandler.onRequest(inputStream, outputStream);
             }
-            out.flush();
+            outputStream.flush();
         }
     }
 }
 
+
 ```
->> 上述类使用Jetty容器完成init(),start(),stop()功能。上述类最重要一个关注点在于RequestHandler实例的初始化，该抽象类定义于Transport模块，主要用于server处理来自client的请求。其抽象方法实现将在RpcServer类中详细讲解。
-## 3 Utils 模块
-> utils模块主要为一些反射工具，其具体实现如下:
-```
-public class ReflectionUtils {
-    /**
-     * 根据class创建对象
-     *
-     * @param clazz 待创建兑现骨干的类
-     * @param <T>   对象类型
-     * @return 创建好的对象
-     */
-    public static <T> T newInstance(Class<T> clazz) throws IllegalStateException{
+>> 上述类使用Jetty容器完成init(),start(),stop()功能。上述类最重要一个关注点在于RequestHandler实例的初始化，该抽象类定义于Transport模块，主要用于server处理来自client的请求。其抽象方法实现将在RPCServer类中详细讲解。
 
-        try {
-            return clazz.newInstance();
-        } catch (Exception e) {
-           throw new IllegalStateException(e);
-        }
-    }
-
-    /**
-     * 获取某个class的共有方法
-     *
-     * @param clazz
-     * @return 当前类声明的共有方法
-     */
-    public static Method[] getPublicMethods(Class clazz) {
-        Method[] methods = clazz.getDeclaredMethods();
-        List<Method> pmethods = new ArrayList<>();
-        for (Method m : methods) {
-            if (Modifier.isPublic(m.getModifiers())) {
-                pmethods.add(m);
-            }
-        }
-        return pmethods.toArray(new Method[0]);
-    }
-
-    /**
-     * 调用指定对象的方法
-     *
-     * @param obj    被调用的对象
-     * @param method 被调用的方法
-     * @param args   方法的参数
-     * @return 返回结果
-     */
-    public static Object invoke(Object obj, Method method, Object... args) throws IllegalStateException{
-        try {
-            return method.invoke(obj, args);
-        } catch (Exception e) {
-           throw new IllegalStateException(e);
-        }
-    }
-
-}
-```
->> 上述getPublicMethods()方法一个用途是Server注册时存储所有的method的ServcieSescriptor。invoke()方法用于执行指定实例对象的method。
-## 4 Server 模块
+## 5 gkrpc-server 模块
 > 本项目最核心两个模块之一，主要作用是定义了处理client请求的方法。
->> 4.1 RpcServer类实现如下：
+>> 5.1 RPCServer类实现如下：
 ```
-@Slf4j
-public class RpcServer {
+/**
+     * 服务配置信息
+     */
     private RPCServerConfig config;
+
     private TransportServer net;
+
     private Encoder encoder;
+
     private Decoder decoder;
+
     private ServiceManager serviceManager;
-    private ServiceInvoker serviceInvoker;
-
-    public RpcServer() {
-
-    }
-
-    public RpcServer(RPCServerConfig config) {
-        this.config = config;
-
-        //net
-        this.net = ReflectionUtils.newInstance(config.getTransportClass());
-        this.net.init(config.getPort(),this.handler);
-
-        //codec
-        this.encoder = ReflectionUtils.newInstance(config.getEncoderClass());
-        this.decoder = ReflectionUtils.newInstance(config.getDecoderClass());
-
-        //service
-        this.serviceManager = new ServiceManager();
-        this.serviceInvoker = new ServiceInvoker();
-    }
-
-
-    public <T> void register(Class<T> interfaceClasss,T bean){
-        serviceManager.register(interfaceClasss,bean);
-    }
-
-    public void start(){
-        this.net.start();
-    }
-
-    public void stop(){
-        this.net.stop();
-    }
 
     private RequestHandler handler = new RequestHandler() {
         @Override
-        public void onRequest(InputStream recive, OutputStream toResp) {
-            Response resp = new Response();
+        public void onRequest(InputStream inputStream, OutputStream outputStream) {
+            Response response = new Response();
             try {
-                byte[] inBytes = new byte[recive.available()];
+                // 处理请求
+                byte[] bytes = IOUtils.readFully(inputStream, inputStream.available(), true);
+                Request request = decoder.decode(bytes, Request.class);
+                log.info("get request: {}", request.toString());
+                ServiceInstance serviceInstance = serviceManager.lookup(request);
+                if (serviceInstance == null) {
+                    throw new IllegalStateException("service not exist!");
+                }
+                Object res = ServiceInvoke.invoke(serviceInstance, request);
+                response.setData(res);
 
-                IOUtils.readFully(recive,inBytes,0,recive.available());
-               // byte[] inBytes = IOUtils.readFully(recive,recive.available());
-                Request request = decoder.decode(inBytes,Request.class);//这里是从client传过来的
-
-                log.info("get request: {}",request);
-
-                ServiceInstance sis = serviceManager.lookup(request );//request封装了ServiceDescriptor描述字符串
-                Object ret = serviceInvoker.invoke(sis,request);//执行返回结果
-
-                resp.setData(ret);
-
-            } catch (Exception e) {
-                log.warn(e.getMessage(),e);
-                resp.setCode(1);
-                resp.setMessage("RpcServer got error"+e.getClass().getName()+" : "+e.getMessage());
-
-            }finally {
+            } catch (IOException e) {
+                log.warn(e.getMessage(), e);
+                response.setCode(400);
+                response.setMessage("RpcServer get Error: " + e.getClass().getName() + "\n :" + e.getMessage());
+            } finally {
+                byte[] bytes = encoder.encode(response);
                 try {
-                    byte[] outBytes = encoder.encode(resp);
-                    toResp.write(outBytes);
-                    log.info("response client");
+                    outputStream.write(bytes);
+                    log.info("response to client!");
                 } catch (IOException e) {
-                    log.warn(e.getMessage(),e);
+                    log.warn(e.getMessage(), e);
                 }
             }
         }
     };
+
+    public RPCServer() {
+        this(new RPCServerConfig());
+    }
+
+    public RPCServer(RPCServerConfig rpcServerConfig) {
+        this.config = rpcServerConfig;
+
+        this.encoder = ReflectionUtils.newInstance(config.getEncoder());
+        this.decoder = ReflectionUtils.newInstance(config.getDecoder());
+        this.net = ReflectionUtils.newInstance(config.getTransportClass());
+        this.net.init(config.getPort(), this.handler);
+
+        this.serviceManager = new ServiceManager();
+    }
+
+    public <T> void register(Class<T> interfaceClass, T bean) {
+        serviceManager.register(interfaceClass, bean);
+    }
+
+    public void start() {
+        this.net.start();
+    }
+
+    public void stop() {
+        this.net.stop();
+    }
 }
+
+// 该方法初时较复杂，理清各个类之后将比较明了。
+// 上述RPCServerConfig主要用于常量配置的定义，Encoder与Decoder分别为编码器与解码器不做过多解释。
+``` 
+>> 5.2 ServiceManager类的实现如下:
 ```
->> 该方法初时较复杂，理清各个类之后将比较明了。上述RpcServerConfig主要用于常量配置的定义，Encoder与Decoder分别为编码器与解码器不做过多解释。  
->> ServiceManager类的实现如下:
-```
+/**
+ * 管理RPC暴露的服务
+ */
 @Slf4j
 public class ServiceManager {
-    private Map<ServiceDescriptor,ServiceInstance> services;
+    /**
+     * 保存注册的service
+     */
+    private Map<ServiceDescriptor, ServiceInstance> services;
 
-    public ServiceManager(){
+    public ServiceManager() {
         this.services = new ConcurrentHashMap<>();
     }
-    public <T> void register(Class<T> interfaceClass, T bean){
-        Method[] methods = ReflectionUtils.getPublicMethods(interfaceClass);
-        for (Method method :methods){
-            ServiceInstance sis = new ServiceInstance(bean,method);
-            ServiceDescriptor sdp = ServiceDescriptor.from(interfaceClass,method);
 
-            services.put(sdp,sis);
-            log.info("register service {} {}",sdp.getClazz(),sdp.getMethod());
+    /**
+     * 注册服务
+     * @param interfaceClass
+     * @param bean
+     * @param <T>
+     */
+    public <T> void register(Class<T> interfaceClass, T bean) {
+        Method[] methods = ReflectionUtils.getPublicMethods(interfaceClass);
+        for (Method method : methods) {
+            ServiceInstance serviceInstance = new ServiceInstance(bean, method);
+            ServiceDescriptor sd = ServiceDescriptor.getServiceDescriptor(interfaceClass, method);
+            this.services.put(sd, serviceInstance);
+
+            log.info("register service: {} {}", sd.getClassName(), sd.getMethodName());
         }
     }
 
-    public ServiceInstance lookup(Request request){
-        ServiceDescriptor sdp = request.getServiceDescriptor();
-        return services.get(sdp);
+    /**
+     * 查找服务
+     * @param request
+     * @return
+     */
+    public ServiceInstance lookup(Request request) {
+        return services.get(request.getServiceDescriptor());
     }
-}
 ```
 >> register()方法主要用于注册该class的所有共有方法，并且获取之前讲述的ServiceDescriptor实例与ServiceInstance作为键值对的形式存储。**（需要注意的是这里的registetr方法的参数bean正是需要执行的实例对象）**其ServiceInstance类的定义如下：
 ```
@@ -347,45 +382,55 @@ public class ServiceInstance {
 >> 其内部主要定义了连个变量，一个是需要执行某个method的目标对象，另一个是需要执行的method。**（到这里应该认识了ServiceManager的真正作用，存储method的描述与实例的对应关系，方便通过client的传参进行get）**  
 >> 回到上述初始类RpcServer，最需要注意的是RequestHandler的实现。其onRequest()方法通过Servlet的inputStream与OutputStream参数获取来自Client的数据，并且通过获取到的Request实例参数从ServiceManager中get实例对象与method。因为Request对象中包含有Client获取到的实际参数，因此将上述参数一起传递到ServiceInvoker对象进行执行。该类实现如下：
 ```
-public class ServiceInvoker {
-    public Object invoke(ServiceInstance service, Request request){
-        return ReflectionUtils.invoke(service.getTarget(),service.getMethod(),request.getParameters());
+/**
+ * 通过反射执行服务实例的方法
+ */
+public class ServiceInvoke {
+
+    public static Object invoke(ServiceInstance serviceInstance, Request request) {
+        return ReflectionUtils.invoke(
+                serviceInstance.getTarget(),
+                serviceInstance.getMethod(),
+                request.getParameters());
     }
 }
 ```
 >> 上述代码最终只是调用common模块的反射工具封装执行。
-## 5 Client 模块
-> 该模块主要功能有连个一个时动态代理获取实参，一个是请求Server进行过程调用。
->> 其RpcClient类实现如下：
+## 6 gkrpc-client 模块
+> 该模块主要功能有连个一个是动态代理获取实参，一个是请求Server进行过程调用。
+>> 其RPCClient类实现如下：
 ```
-public class RpcClient {
-    private RpcClientConfig config;
+public class RPCClient {
+
+    private RPCClientConfig config;
     private Encoder encoder;
     private Decoder decoder;
     private TransportSelector selector;
 
-    public RpcClient(RpcClientConfig config) {
+    public RPCClient() {
+        this(new RPCClientConfig());
+    }
+
+    public RPCClient(RPCClientConfig config) {
         this.config = config;
-        this.encoder = ReflectionUtils.newInstance(this.config.getEncoderClass());
-        this.decoder = ReflectionUtils.newInstance(this.config.getDecoderClass());
-        this.selector = ReflectionUtils.newInstance(this.config.getSelectorClass());
 
-        this.selector.init(this.config.getServers(),
-                this.config.getConnectCount(),
-                this.config.getTransportClass());
-
+        this.encoder = ReflectionUtils.newInstance(config.getEncoderClass());
+        this.decoder = ReflectionUtils.newInstance(config.getDecoderClass());
+        this.selector = ReflectionUtils.newInstance(config.getSelectorClass());
+        this.selector.init(config.getServers(), config.getConnectCount(), config.getTransportClass());
     }
 
-    public RpcClient() {
-        this(new RpcClientConfig());
-    }
-
-    public <T> T getProxy(Class<T> clazz){
-        return (T)Proxy.newProxyInstance(
+    /**
+     * 创建代理对象,由代理对象去发送请求
+     * @param clazz
+     * @param <T>
+     * @return
+     */
+    public <T> T getProxy(Class<T> clazz) {
+        return (T) Proxy.newProxyInstance(
                 getClass().getClassLoader(),
                 new Class[]{clazz},
-                new RemoteInvoker(clazz,encoder,decoder,selector)
-        );
+                new RemoteHandler(clazz, encoder, decoder, selector));
     }
 }
 ```
@@ -501,7 +546,9 @@ public class RemoteInvoker implements InvocationHandler{
 >> 上述代码需要关注invoke()方法中对代理方法的参数进行存储封装到Request对象并且最终序列化传递到Server。至此本项目个关键模块实现与执行流程介绍完毕。
 
 # 下一步
-> * 线程池
+> * 服务端线程池
+> * 客户端负载均衡
 > * 注册中心
 > * 数据安全传输
+> * 其他网络传输协议
 > * 流行框架集成
