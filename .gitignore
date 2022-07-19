@@ -1,0 +1,8 @@
+# Project exclude paths
+/gkrpc-client/target/
+/gkrpc-codec/target/
+/gkrpc-common/target/
+/gkrpc-example/target/
+/gkrpc-proto/target/
+/gkrpc-server/target/
+/gkrpc-transport/target/
